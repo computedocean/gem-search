@@ -123,7 +123,7 @@ python3 scripts/spider_demo.py       # terminal 2: stream fictional sample posts
 
 The walkthrough sends each post through the extension API and prints what the real engine reports back: captures, engine events, every lead with its growth and four checks. Use `scripts/sample_signals.py` instead for a silent load, or `--speed 2` for a faster run.
 
-1. Open **http://127.0.0.1:8787**, wait ~10 seconds for the spider loop.
+1. Open **http://127.0.0.1:8787** (sign in with the link from `python3 app.py --login-url`), wait ~10 seconds for the spider loop.
 2. In **Discovery**, switch **All types** to **Tickers $**, then **New narratives**.
 3. Set the sort to **Fastest growing**: `$WEBZ` and “rainbow spiders” jump to the top at ×9.
 4. Open a lead to see the **Signal velocity** panel, the posts behind it and the Solscan / X search link.
@@ -197,7 +197,7 @@ cp .env.example .env
 python3 app.py
 ```
 
-1. Open **http://127.0.0.1:8787**. Visit **Connections** and copy the local pairing code.
+1. Open the sign-in link printed by `python3 app.py` (or run `python3 app.py --login-url`). Visit **Connections** and copy the local pairing code.
 2. Open **chrome://extensions**, enable **Developer mode**, click **Load unpacked**, select this repository's **extension/** directory.
 3. Open the Gem Search toolbar popup, paste the pairing code and click **Connect**.
 4. Open an X feed, search or profile page. Click **Release spider on this tab**.

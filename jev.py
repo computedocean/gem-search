@@ -49,6 +49,9 @@ class Jev:
         posts=normalize_capture(data)
         added=0
         with self.connect() as con:
+            # Posts older than the 24h narrative window can never contribute; retire them so a
+            # stuck batch cannot block capture forever. Kept as processed rows, pruned after 7 days.
+            con.execute('UPDATE spider_posts SET processed=1 WHERE processed=0 AND created<?',(time.time()-86400,))
             pending=con.execute('SELECT COUNT(*) FROM spider_posts WHERE processed=0').fetchone()[0]
             if pending+len(posts)>500:raise ValueError('Local queue full; let crawler catch up')
             for p in posts:

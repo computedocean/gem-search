@@ -16,12 +16,14 @@ from grok import GrokReview
 
 with tempfile.TemporaryDirectory() as temp, patch.dict(os.environ,{'GROK_ENABLED':'0'}):
     app.DATA=Path(temp);app.DB=app.DATA/'test.sqlite';app.init()
-    app.JEV=Jev(app.connect);app.GROK=GrokReview(app.connect);app.EXTENSION_KEY='a'*43
+    app.JEV=Jev(app.connect);app.GROK=GrokReview(app.connect);app.EXTENSION_KEY='a'*43;app.DASHBOARD_TOKEN='d'*43
     server=app.ThreadingHTTPServer(('127.0.0.1',0),app.Handler)
     thread=threading.Thread(target=server.serve_forever,daemon=True);thread.start()
     base=f'http://127.0.0.1:{server.server_port}'
-    def req(path,body=None,key=''):
-        request=Request(base+path,data=None if body is None else json.dumps(body).encode(),headers={'X-Gem-Extension':key,'Content-Type':'application/json'})
+    def req(path,body=None,key='',bearer=''):
+        headers={'X-Gem-Extension':key,'Content-Type':'application/json'}
+        if bearer:headers['Authorization']='Bearer '+bearer
+        request=Request(base+path,data=None if body is None else json.dumps(body).encode(),headers=headers)
         try:
             with urlopen(request,timeout=5) as response:return response.status,response.read()
         except HTTPError as e:return e.code,e.read()
@@ -44,7 +46,8 @@ with tempfile.TemporaryDirectory() as temp, patch.dict(os.environ,{'GROK_ENABLED
         assert app.JEV.status()['pending']==0
         assert not app.SCAN_LOCK.locked()
         assert app.STATE['running'] is False
-        state=json.loads(req('/api/state')[1]);assert any(p['id']=='spider-agents' for p in state['projects'])
+        assert req('/api/state',key=app.EXTENSION_KEY)[0]==401
+        state=json.loads(req('/api/state',bearer=app.DASHBOARD_TOKEN)[1]);assert any(p['id']=='spider-agents' for p in state['projects'])
         assert all(p['source']=='spider' for p in state['projects'])
         print('Extension HTTP + pipeline OK: pairing, scope isolation, capture, dedup, crawler handoff, narrative, durable ack, demo assets.')
     finally:

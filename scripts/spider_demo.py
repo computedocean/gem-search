@@ -101,6 +101,9 @@ def call(base, path, body=None, key=''):
     headers = {'Content-Type': 'application/json'}
     if key:
         headers['X-Gem-Extension'] = key
+    elif path == '/api/state':
+        # Same machine, same data directory: read the dashboard sign-in token directly.
+        headers['Authorization'] = 'Bearer ' + (ROOT / 'data' / 'dashboard-token').read_text().strip()
     data = None if body is None else json.dumps(body).encode()
     with urlopen(Request(base + path, data, headers), timeout=10) as response:
         return json.loads(response.read())

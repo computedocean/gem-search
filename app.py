@@ -4,7 +4,9 @@ import argparse
 from contextlib import contextmanager
 import concurrent.futures
 import hashlib
+import hmac
 import http.client
+from http.cookies import CookieError, SimpleCookie
 import ipaddress
 import json
 import math
@@ -15,12 +17,13 @@ import secrets
 import socket
 import sqlite3
 import ssl
+import sys
 import threading
 import time
 from datetime import datetime, timezone
 from html.parser import HTMLParser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import urljoin, urlsplit, urlencode
+from urllib.parse import parse_qs, urljoin, urlsplit, urlencode
 from urllib.request import Request, urlopen
 from urllib.error import HTTPError
 from automation import Automation, discover_free, load_env
@@ -30,7 +33,6 @@ from jev import Jev
 ROOT = Path(__file__).resolve().parent
 DATA = ROOT / 'data'
 DB = DATA / 'gem-search.sqlite'
-TOKEN = secrets.token_urlsafe(32)
 SCAN_LOCK = threading.Lock()
 STATE_LOCK = threading.Lock()
 STATE = {'running': False, 'stage': 'idle', 'error': None, 'autopilot': False,
@@ -41,6 +43,12 @@ AUTO = None
 JEV = None
 GROK = None
 EXTENSION_KEY = ''
+# Dashboard sign-in secret, persisted in data/dashboard-token. Never served over HTTP.
+DASHBOARD_TOKEN = ''
+SESSION_COOKIE = 'gem_session'
+SECRET_FORMAT = re.compile(r'[A-Za-z0-9_-]{40,100}')
+RETENTION_DAYS = 30
+LOGIN_PAGE = (ROOT / 'static' / 'login.html').read_bytes()
 
 
 def now():
@@ -58,10 +66,65 @@ def connect():
         con.close()
 
 
+def ensure_secret(path):
+    """Read a local secret, creating it atomically (0600) if absent or truncated."""
+    try:
+        value = path.read_text().strip()
+        if SECRET_FORMAT.fullmatch(value):
+            return value
+    except FileNotFoundError:
+        pass
+    value = secrets.token_urlsafe(32)
+    tmp = path.with_name(f'.{path.name}.{os.getpid()}.{secrets.token_hex(4)}.tmp')
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        with os.fdopen(fd, 'w') as handle:
+            handle.write(value)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp, path)
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
+    return value
+
+
+def derived(purpose):
+    """Stable per-install values derived from the sign-in secret; empty when unset."""
+    if not DASHBOARD_TOKEN:
+        return ''
+    return hmac.new(DASHBOARD_TOKEN.encode(), purpose.encode(), hashlib.sha256).hexdigest()
+
+
+def login_url(port):
+    return f'http://127.0.0.1:{port}/login?token={DASHBOARD_TOKEN}'
+
+
+def prune_files(retention_days=None):
+    """Remove old regular files from processed/ and failed/ only. Never inbox or job state."""
+    days = RETENTION_DAYS if retention_days is None else retention_days
+    cutoff = time.time() - days * 86400
+    removed = 0
+    for folder in ('processed', 'failed'):
+        directory = DATA / folder
+        if not directory.is_dir():
+            continue
+        for path in directory.iterdir():
+            try:
+                if path.is_symlink() or not path.is_file() or path.stat().st_mtime >= cutoff:
+                    continue
+                path.unlink()
+                removed += 1
+            except OSError:
+                continue
+    return removed
+
+
 def init():
     DATA.mkdir(exist_ok=True)
     (DATA / 'inbox').mkdir(exist_ok=True)
     (DATA / 'processed').mkdir(exist_ok=True)
+    (DATA / 'failed').mkdir(exist_ok=True)
     with connect() as con:
         con.executescript('''
         PRAGMA journal_mode=WAL;
@@ -250,6 +313,8 @@ def cached_crawl(url):
     result=crawl(url)
     with connect() as con:
         con.execute('INSERT OR REPLACE INTO service_cache VALUES (?,?,?)',(key,time.time(),json.dumps(result)))
+        # Expired crawl entries are never read again; keep the volume bounded.
+        con.execute("DELETE FROM service_cache WHERE key LIKE 'crawl:%' AND updated<?",(time.time()-86400,))
     return result
 
 
@@ -535,8 +600,9 @@ def scan(posts, source):
 
 
 def begin(posts, source, background=True):
+    """None: another scan holds the lock. Otherwise True/started, or the scan result."""
     if not SCAN_LOCK.acquire(blocking=False):
-        return False
+        return None
     with STATE_LOCK:
         STATE.update(running=True, stage='starting', error=None)
     if background:
@@ -569,19 +635,44 @@ def autopilot():
                 event(f'Free feed unavailable: {type(exc).__name__}; next poll in 30 min')
         if os.getenv('X_BEARER_TOKEN') and os.getenv('ENABLE_PAID_X') == '1':
             start_x()
-        for path in sorted((DATA / 'inbox').glob('*.json'))[:10]:
-            if path.is_symlink():
-                continue
+        process_inbox()
+        try:
+            prune_files()
+        except OSError as exc:
+            event(f'Retention cleanup skipped: {type(exc).__name__}')
+
+
+def process_inbox():
+    """Invalid files move to failed/; storage or scan errors leave the file for a retry."""
+    for path in sorted((DATA / 'inbox').glob('*.json'))[:10]:
+        if path.is_symlink():
+            continue
+        try:
+            if path.stat().st_size > MAX_BODY:
+                raise ValueError('Input exceeds 2 MB')
+            posts = validate_posts(json.loads(path.read_text()))
+        except (ValueError, UnicodeDecodeError) as exc:
+            event(f'Inbox {path.name}: {str(exc)[:150]}; moved to failed/')
             try:
-                if path.stat().st_size > MAX_BODY:
-                    raise ValueError('Input exceeds 2 MB')
-                posts = validate_posts(json.loads(path.read_text()))
-                if begin(posts, 'import', background=False):
-                    path.rename(DATA / 'processed' / f'{time.time_ns()}-{path.name}')
-                else:
-                    break
-            except Exception as exc:
-                event(f'Inbox {path.name}: {str(exc)[:150]}')
+                path.rename(DATA / 'failed' / f'{time.time_ns()}-{path.name}')
+            except OSError:
+                pass
+            continue
+        except OSError as exc:
+            event(f'Inbox {path.name}: unreadable ({type(exc).__name__})')
+            continue
+        result = begin(posts, 'import', background=False)
+        if result is None:
+            break
+        if not result:
+            event(f'Inbox {path.name}: scan failed; kept for retry')
+            break
+        try:
+            path.rename(DATA / 'processed' / f'{time.time_ns()}-{path.name}')
+        except OSError as exc:
+            # Already scanned; dedup by post id makes the retry harmless.
+            event(f'Inbox {path.name}: processed but not archived ({type(exc).__name__})')
+            break
 
 
 def launch_loop():
@@ -596,9 +687,11 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):
         pass
 
-    def send(self, status, body, content_type='application/json; charset=utf-8'):
+    def send(self, status, body, content_type='application/json; charset=utf-8', headers=()):
         payload = json.dumps(body).encode() if isinstance(body, (dict, list)) else body
         self.send_response(status)
+        for name, value in headers:
+            self.send_header(name, value)
         self.send_header('Content-Type', content_type)
         self.send_header('Content-Length', str(len(payload)))
         self.send_header('Cache-Control', 'no-store')
@@ -620,6 +713,45 @@ class Handler(BaseHTTPRequestHandler):
     def extension_auth(self):
         return bool(EXTENSION_KEY) and secrets.compare_digest(self.headers.get('X-Gem-Extension',''),EXTENSION_KEY)
 
+    def bearer_auth(self):
+        """Scripts on this machine: Authorization: Bearer <data/dashboard-token>. Never sent by browsers implicitly."""
+        header = self.headers.get('Authorization', '')
+        return bool(DASHBOARD_TOKEN) and header.startswith('Bearer ') and secrets.compare_digest(header[7:].strip(), DASHBOARD_TOKEN)
+
+    def session_auth(self):
+        expected = derived('session-v1')
+        if not expected:
+            return False
+        try:
+            cookie = SimpleCookie(self.headers.get('Cookie', ''))
+        except CookieError:
+            return False
+        morsel = cookie.get(SESSION_COOKIE)
+        return morsel is not None and secrets.compare_digest(morsel.value, expected)
+
+    def dashboard_auth(self):
+        return self.bearer_auth() or self.session_auth()
+
+    def same_origin(self):
+        """Reject cross-site browser requests even if a cookie would be attached."""
+        origin = self.headers.get('Origin')
+        if origin is not None and origin not in (f'http://127.0.0.1:{self.server.server_port}', f'http://localhost:{self.server.server_port}'):
+            return False
+        return self.headers.get('Sec-Fetch-Site', 'same-origin') in ('same-origin', 'none')
+
+    def write_auth(self):
+        if self.bearer_auth():
+            return True
+        csrf = derived('csrf-v1')
+        return (self.session_auth() and self.same_origin() and bool(csrf)
+                and secrets.compare_digest(self.headers.get('X-Gem-Token', ''), csrf))
+
+    def login(self, supplied):
+        if not DASHBOARD_TOKEN or not isinstance(supplied, str) or not secrets.compare_digest(supplied, DASHBOARD_TOKEN):
+            return self.send(403, LOGIN_PAGE.replace(b'<!--error-->', b'<p class="notice">That sign-in token was not accepted.</p>'), 'text/html; charset=utf-8')
+        cookie = f'{SESSION_COOKIE}={derived("session-v1")}; Path=/; HttpOnly; SameSite=Strict; Max-Age=2592000'
+        return self.send(303, b'', 'text/plain; charset=utf-8', [('Set-Cookie', cookie), ('Location', '/')])
+
     def do_OPTIONS(self):
         if not self.allowed_host() or not self.path.startswith('/api/extension/') or not re.fullmatch(r'chrome-extension://[a-p]{32}',self.headers.get('Origin','')):
             return self.send(403,{'error':'Origin not allowed'})
@@ -628,13 +760,25 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         if not self.allowed_host():
             return self.send(403, {'error': 'Local requests only'})
-        path = urlsplit(self.path).path
+        parts = urlsplit(self.path)
+        path = parts.path
+        if path == '/healthz':
+            return self.send(200, {'ok': True})
+        if path == '/login':
+            supplied = parse_qs(parts.query, keep_blank_values=True).get('token', [None])[0]
+            if supplied is not None:
+                return self.login(supplied)
+            return self.send(200, LOGIN_PAGE, 'text/html; charset=utf-8')
+        if path == '/' and not self.dashboard_auth():
+            return self.send(200, LOGIN_PAGE, 'text/html; charset=utf-8')
         if path=='/api/extension/status':
             if not self.extension_auth():return self.send(403,{'error':'Pairing required'})
             with connect() as con:
                 leads=con.execute("SELECT COUNT(*) FROM projects WHERE source='spider' AND status='shortlisted'").fetchone()[0]
             return self.send(200,{'spider':JEV.status(),'grok':GROK.status(),'leads':leads})
         if path == '/api/state':
+            if not self.dashboard_auth():
+                return self.send(401, {'error': 'Sign-in required', 'login': '/login'})
             with connect() as con:
                 projects = [json.loads(r['payload']) for r in con.execute('SELECT payload FROM projects ORDER BY score DESC,updated DESC')]
                 runs = [dict(r) for r in con.execute('SELECT * FROM runs ORDER BY id DESC LIMIT 25')]
@@ -642,7 +786,8 @@ class Handler(BaseHTTPRequestHandler):
                 launches = [json.loads(r['payload']) for r in con.execute('SELECT payload FROM launches ORDER BY created DESC')]
             with STATE_LOCK:
                 state = dict(STATE)
-            return self.send(200, {'state': state, 'projects': projects, 'runs': runs, 'events': events, 'token': TOKEN,
+            # csrf is a derived per-install value: it authorizes nothing without the HttpOnly session cookie.
+            return self.send(200, {'state': state, 'projects': projects, 'runs': runs, 'events': events, 'csrf': derived('csrf-v1'),
                                    'launches': launches, 'automation': AUTO.status() if AUTO else None,
                                    'spider':JEV.status() if JEV else None,'pairing_code':EXTENSION_KEY,
                                    'grok':GROK.status() if GROK else None,
@@ -660,7 +805,20 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         extension_request=self.path=='/api/extension/ingest'
-        if not self.allowed_host() or (not self.extension_auth() if extension_request else self.headers.get('X-Gem-Token') != TOKEN):
+        if not self.allowed_host():
+            return self.send(403, {'error': 'Local requests only'})
+        if self.path == '/login':
+            if not self.same_origin():
+                return self.send(403, {'error': 'Cross-site sign-in rejected'})
+            try:
+                size = int(self.headers.get('Content-Length', '0'))
+            except ValueError:
+                size = -1
+            if not 0 <= size <= 4096:
+                return self.send(413, {'error': 'Request too large'})
+            form = parse_qs(self.rfile.read(size).decode('utf-8', errors='replace'))
+            return self.login(form.get('token', [''])[0].strip())
+        if not (self.extension_auth() if extension_request else self.write_auth()):
             return self.send(403, {'error': 'Invalid local session'})
         try:
             size = int(self.headers.get('Content-Length', '0'))
@@ -684,12 +842,15 @@ class Handler(BaseHTTPRequestHandler):
             elif self.path == '/api/launch-control':
                 if not AUTO or not isinstance(data, dict) or type(data.get('enabled')) is not bool:
                     raise ValueError('enabled must be boolean')
-                AUTO.enabled = data['enabled']
                 pause_file = DATA / 'launch-paused'
-                if AUTO.enabled:
-                    pause_file.unlink(missing_ok=True)
-                else:
+                # Pausing takes effect in memory even if the volume is unwritable; the
+                # durable marker is written first so a reported success survives restarts.
+                if not data['enabled']:
+                    AUTO.enabled = False
                     pause_file.touch()
+                else:
+                    pause_file.unlink(missing_ok=True)
+                    AUTO.enabled = True
                 event('Automatic launch queue ' + ('resumed' if AUTO.enabled else 'paused'))
                 return self.send(200, {'ok': True})
             elif self.path == '/api/autopilot':
@@ -701,34 +862,50 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send(200, {'ok': True})
             else:
                 return self.send(404, {'error': 'Not found'})
-            return self.send(202 if started else 409, {'ok': started, 'error': None if started else 'A scan is already running'})
+            return self.send(202 if started else 409, {'ok': bool(started), 'error': None if started else 'A scan is already running'})
         except (ValueError, TypeError, KeyError) as exc:
             return self.send(400, {'error': str(exc)[:300]})
+        except (sqlite3.Error, OSError) as exc:
+            # No paths, SQL or secrets in responses; the type name is enough to diagnose.
+            return self.send(500, {'error': f'Storage error ({type(exc).__name__}); nothing was reported as saved'})
 
 
 def main():
-    global AUTO,JEV,GROK,EXTENSION_KEY
+    global AUTO,JEV,GROK,EXTENSION_KEY,DASHBOARD_TOKEN,RETENTION_DAYS
     load_env(ROOT)
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--port', type=int, default=8787)
     parser.add_argument('--autopilot', action='store_true', help='Watch data/inbox every five minutes')
+    parser.add_argument('--login-url', action='store_true', help='Print the dashboard sign-in link and exit')
     args = parser.parse_args()
+    if args.login_url:
+        DATA.mkdir(exist_ok=True)
+        DASHBOARD_TOKEN = ensure_secret(DATA / 'dashboard-token')
+        print(login_url(args.port))
+        return
+    try:
+        RETENTION_DAYS = max(1, int(os.getenv('GEM_SEARCH_RETENTION_DAYS', '30')))
+    except ValueError:
+        RETENTION_DAYS = 30
     init()
-    key_path=DATA/'extension-key'
-    if not key_path.exists():
-        fd=os.open(key_path,os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600)
-        with os.fdopen(fd,'w') as keyfile:keyfile.write(secrets.token_urlsafe(32))
-    EXTENSION_KEY=key_path.read_text().strip()
+    EXTENSION_KEY = ensure_secret(DATA / 'extension-key')
+    DASHBOARD_TOKEN = ensure_secret(DATA / 'dashboard-token')
     JEV=Jev(connect)
     GROK=GrokReview(connect)
     AUTO = Automation(ROOT, DATA, connect, event)
     STATE['autopilot'] = args.autopilot
-    server = ThreadingHTTPServer(('127.0.0.1', args.port), Handler)
+    bind_host = os.environ.get('GEM_SEARCH_HOST', '127.0.0.1')
+    server = ThreadingHTTPServer((bind_host, args.port), Handler)
     server.daemon_threads = True
     threading.Thread(target=autopilot, daemon=True).start()
     threading.Thread(target=launch_loop, daemon=True).start()
     threading.Thread(target=spider_loop, daemon=True).start()
-    print(f'Gem Search → http://127.0.0.1:{args.port}', flush=True)
+    print(f'Gem Search → http://127.0.0.1:{args.port} · launch mode: {AUTO.mode()}', flush=True)
+    # The sign-in link is a credential: show it on an interactive terminal, never in service logs.
+    if sys.stdout.isatty():
+        print(f'Sign in: {login_url(args.port)}', flush=True)
+    else:
+        print('Sign-in link: run `python app.py --login-url` (Docker: docker exec gem-search python app.py --login-url)', flush=True)
     try:
         server.serve_forever()
     except KeyboardInterrupt:

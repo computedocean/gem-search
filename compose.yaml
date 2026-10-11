@@ -1,0 +1,56 @@
+name: gem-search
+
+services:
+  gem-search:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: gem-search:local
+    container_name: gem-search
+    init: true
+    restart: unless-stopped
+    stop_grace_period: 15s
+    ports:
+      # Loopback only. This is not authentication; the dashboard still requires sign-in.
+      - "127.0.0.1:8787:8787"
+    environment:
+      GEM_SEARCH_HOST: "0.0.0.0"
+      LAUNCH_MODE: "dry_run"
+      # Overrides LAUNCH_MODE: this deployment cannot enter live mode without editing this file.
+      GEM_SEARCH_DRY_RUN_LOCK: "1"
+      FREE_FEED_ENABLED: "1"
+      ENABLE_PAID_X: "0"
+      GROK_ENABLED: "0"
+      SPIDER_ALLOW_LAUNCH: "0"
+      GEM_SEARCH_RETENTION_DAYS: "30"
+    volumes:
+      - gem-search-data:/app/data
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m,mode=1777,noexec,nosuid,nodev
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 128
+    mem_limit: 512m
+    cpus: 1.0
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8787/healthz', timeout=3).close()"
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+volumes:
+  gem-search-data:
+    name: gem-search-data

@@ -30,13 +30,17 @@ The shared 24-hour request allowance is reserved atomically before a full review
 
 | Route | Authorization | Purpose |
 | --- | --- | --- |
-| GET /api/state | Loopback, same-origin browser boundary | Local dashboard state and pairing code |
+| GET /healthz | None | Liveness only; returns no data |
+| GET, POST /login | Sign-in token (`data/dashboard-token`) | Sets the HttpOnly, SameSite=Strict session cookie |
+| GET /api/state | Session cookie or `Authorization: Bearer <token>` | Dashboard state, pairing code and CSRF value |
 | GET /api/extension/status | X-Gem-Extension | Capture counts and nonsecret model status |
 | POST /api/extension/ingest | X-Gem-Extension | Durably accept up to 20 posts |
-| POST /api/demo, /api/import | X-Gem-Token | Dashboard research actions |
-| POST /api/launch-control | X-Gem-Token | Pause/resume the separate optional queue |
+| POST /api/demo, /api/import, /api/x, /api/launches, /api/launches/check, /api/autopilot | Session cookie + X-Gem-Token (CSRF) + same Origin, or Bearer | Dashboard research actions |
+| POST /api/launch-control | Session cookie + X-Gem-Token (CSRF) + same Origin, or Bearer | Pause/resume the separate optional queue |
 
-Extension credentials cannot invoke dashboard actions. CORS headers are restricted to the extension API and Chrome extension origins, with a separate pairing key still required. The engine is a single-user local process, not a remotely authenticated service.
+All routes also require a `Host` of `127.0.0.1:<port>` or `localhost:<port>`, which blocks DNS rebinding. Loopback binding is not treated as authentication, because any local program can reach the port. The sign-in token is never returned over HTTP. The CSRF value is derived from it and authorizes nothing without the session cookie. Running `python app.py --login-url` prints the sign-in link; it is printed at startup only on an interactive terminal, never into service logs.
+
+Extension credentials cannot invoke dashboard actions, and dashboard credentials cannot use extension routes. CORS headers are restricted to the extension API and Chrome extension origins, with a separate pairing key still required.
 
 ## Optional launch boundary
 

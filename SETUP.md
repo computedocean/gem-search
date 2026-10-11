@@ -2,6 +2,8 @@
 
 For the browser spider, follow the quick start in [README.md](README.md). No wallet, Pinata account or npm build is required for browser research.
 
+The dashboard requires sign-in. `python3 app.py` prints a one-click sign-in link on an interactive terminal, or you can run `python3 app.py --login-url` at any time. To run it in Docker, see [docs/DOCKER.md](docs/DOCKER.md).
+
 ## Optional Grok
 
 Copy `.env.example` to `.env`, then set GROK_ENABLED=1 and XAI_API_KEY locally. Restart Python. The default request limit is 12 per rolling day, shared by the four reviewers. Do not paste API keys into issues or chat messages.

@@ -12,6 +12,7 @@ function lookup(p){if(p.kind==='ticker')return `<a class="evidence" href="https:
 function notice(message) { $('#notice').textContent = message; $('#notice').hidden = !message; }
 async function api(path, body) {
   const response = await fetch('/api/' + path, body === undefined ? {} : {method:'POST',headers:{'Content-Type':'application/json','X-Gem-Token':token},body:JSON.stringify(body)});
+  if (response.status === 401) { location.href = '/login'; throw new Error('Sign-in required'); }
   const data = await response.json();
   if (!response.ok) throw new Error(data.error || 'Request failed');
   return data;
@@ -58,7 +59,7 @@ function render() {
   $('#launches').innerHTML = snapshot.launches?.length ? snapshot.launches.map(l=>`<div class="launch-item"><span class="badge held">${esc(l.status)}</span><h3>${esc(l.name)} <span class="muted">$${esc(l.symbol)}</span></h3><p>${esc(l.description)}</p><p class="project-meta">${esc(l.narrative)} · Dev buy: ${esc(l.amount)} SOL</p><div class="actions"><button class="secondary download-metadata" data-id="${esc(l.id)}">Metadata ↓</button><button class="secondary simulate" data-id="${esc(l.id)}">Check draft</button></div>${l.result?`<p>${esc(l.result)}</p>`:''}</div>`).join('') : '<div class="empty"><div class="glyph">↗</div>Create your first draft.<br>It is saved locally and sends no transaction.</div>';
 }
 async function refresh(force=false) {
-  try { const data=await api('state'); token=data.token; snapshot=data; const next=JSON.stringify(data); if(force||next!==lastRender){lastRender=next;render();} } catch(e){notice('Server unavailable: '+e.message);}
+  try { const data=await api('state'); token=data.csrf; snapshot=data; const next=JSON.stringify(data); if(force||next!==lastRender){lastRender=next;render();} } catch(e){notice('Server unavailable: '+e.message);}
 }
 function download(name,data){const url=URL.createObjectURL(new Blob([JSON.stringify(data,null,2)],{type:'application/json'}));const a=document.createElement('a');a.href=url;a.download=name;a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);}
 document.querySelectorAll('.nav').forEach(el=>el.onclick=()=>setView(el.dataset.view));

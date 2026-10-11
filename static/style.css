@@ -44,3 +44,5 @@ input:focus,textarea:focus{border-color:#9a9aff}
 .score,.stat:last-child .stat-value,.auto-budget b{background:linear-gradient(120deg,#ff6b96,#ffbd73 30%,#71ece6 65%,#ec8ffc);-webkit-background-clip:text;background-clip:text;color:transparent}
 .velocity div{background:#12121c}
 .velocity span{font-size:10px;line-height:1.3}
+
+.login-page{min-height:100vh;display:grid;place-items:center;padding:16px}.login{max-width:520px;width:100%;padding:28px;border:1px solid var(--line);border-radius:12px}.login h1{margin:8px 0 12px}.login pre{background:#0d0d15;border:1px solid var(--line);border-radius:8px;padding:10px 12px;overflow-x:auto}.login form{display:grid;gap:10px;margin-top:18px}.login .notice{color:var(--red)}

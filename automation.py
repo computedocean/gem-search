@@ -16,6 +16,24 @@ from launch_provider import configured_provider, bridge_missing, run_bridge
 CAP = 25_000_000
 DAILY_COUNT = 5
 WINDOW = 86400
+JOB_ID = re.compile(r'[a-f0-9]{24}')
+
+
+def launch_mode():
+    """Fail closed: only the exact value 'live' enables live mode, and a deployment lock overrides it."""
+    if os.getenv('GEM_SEARCH_DRY_RUN_LOCK') == '1':
+        return 'dry_run'
+    return 'live' if os.getenv('LAUNCH_MODE') == 'live' else 'dry_run'
+
+
+def valid_draft(draft, mode):
+    """Shape check at the execution boundary; drafts are built locally but read back from storage."""
+    return (isinstance(draft, dict) and isinstance(draft.get('id'), str) and JOB_ID.fullmatch(draft['id']) is not None
+            and draft.get('mode') == mode and draft.get('amount') == 0
+            and isinstance(draft.get('name'), str) and 0 < len(draft['name']) <= 32
+            and isinstance(draft.get('symbol'), str) and re.fullmatch('[A-Z0-9]{1,10}', draft['symbol']) is not None
+            and isinstance(draft.get('description'), str) and isinstance(draft.get('image_base64'), str)
+            and isinstance(draft.get('provider'), dict))
 
 
 def load_env(root):
@@ -64,7 +82,7 @@ class Automation:
             ''')
 
     def mode(self):
-        return 'live' if os.getenv('LAUNCH_MODE') == 'live' else 'dry_run'
+        return launch_mode()
 
     def provider_status(self):
         try:
@@ -107,11 +125,6 @@ class Automation:
             provider = configured_provider()
         except ValueError:
             return False
-        if topic_key:
-            with self.connect() as con:
-                recent = con.execute('SELECT payload FROM launch_jobs WHERE mode=? AND created>?', (mode, time.time() - 7 * WINDOW))
-                if any(json.loads(r['payload']).get('topic') == topic_key for r in recent):
-                    return False
         identity = hashlib.sha256((mode + fingerprint).encode()).hexdigest()[:24]
         suffix = fingerprint[:5].upper()
         topic = project.get('topic', 'signal')
@@ -124,6 +137,12 @@ class Automation:
                  'created': time.time(), 'status': 'queued', 'amount': 0, 'priority_fee': .00001,
                  'provider': provider, 'mode': mode, 'cap_sol': .025, 'image_base64': base64.b64encode(token_icon(identity)).decode()}
         with self.connect() as con:
+            # Topic check and insert share one write transaction, so concurrent scans cannot both pass the check.
+            con.execute('BEGIN IMMEDIATE')
+            if topic_key:
+                recent = con.execute('SELECT payload FROM launch_jobs WHERE mode=? AND created>?', (mode, time.time() - 7 * WINDOW))
+                if any(json.loads(r['payload']).get('topic') == topic_key for r in recent):
+                    return False
             result = con.execute('INSERT OR IGNORE INTO launch_jobs VALUES (?,?,?,?,?,?,?)',
                                  (identity, mode + ':' + fingerprint, mode, time.time(), None, 'queued', json.dumps(draft)))
         if result.rowcount:
@@ -179,6 +198,11 @@ class Automation:
             draft = json.loads(row['payload'])
         if mode == 'dry_run':
             result = {'status': 'dry_run_complete', 'reason': 'Offline rehearsal. No metadata upload, transaction, SOL cost or on-chain simulation.'}
+        elif not valid_draft(draft, mode) or row['mode'] != mode:
+            result = {'status': 'blocked', 'reason': 'Job failed validation at the execution boundary; no provider was called.'}
+        elif launch_mode() != 'live' or self.missing():
+            # Re-read at the boundary: configuration can change between reservation and execution.
+            result = {'status': 'pending', 'reason': 'Live configuration unavailable at execution time; no provider was called.'}
         elif draft.get('provider', {}).get('kind') == 'bridge':
             def persist(value):
                 with self.connect() as con:
@@ -200,7 +224,7 @@ class Automation:
                 result = {'status': 'pending', 'reason': 'Worker interrupted. Reconcile same job before any new allocation.'}
         draft.update(result)
         with self.connect() as con:
-            con.execute('UPDATE launch_jobs SET status=?,payload=? WHERE id=?', (result['status'], json.dumps(draft), draft['id']))
+            con.execute('UPDATE launch_jobs SET status=?,payload=? WHERE id=?', (result['status'], json.dumps(draft), row['id']))
         if row['status'] != result['status']:
             self.event(f"AUTO {mode}: {draft['name']} → {result['status']}")
 

@@ -1,0 +1,16 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="referrer" content="no-referrer"><title>Gem Search — Sign in</title><link rel="stylesheet" href="/style.css"></head>
+<body class="login-page">
+<main class="login panel">
+<div class="eyebrow">LOCAL WORKSPACE</div>
+<h1>Sign in to <em>Gem Search</em></h1>
+<p>The dashboard controls research scans and the launch queue, so it needs this install's sign-in token. Any program on this computer could otherwise reach it.</p>
+<!--error-->
+<p>Get your sign-in link from a terminal:</p>
+<pre>python app.py --login-url</pre>
+<p class="muted">Docker: <code>docker exec gem-search python app.py --login-url</code></p>
+<form method="post" action="/login"><label for="token">Or paste the token</label><input id="token" name="token" type="password" autocomplete="off" required minlength="40" maxlength="100"><button class="primary" type="submit">Sign in</button></form>
+</main>
+</body>
+</html>
