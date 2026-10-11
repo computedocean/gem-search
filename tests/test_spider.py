@@ -50,6 +50,17 @@ class SpiderTests(unittest.TestCase):
         with patch.dict(os.environ,{'GROK_ENABLED':'0','XAI_API_KEY':''}),patch('grok.urlopen') as request:
             self.assertEqual(self.grok.review({'name':'test'})['status'],'disabled');request.assert_not_called()
 
+    def test_unavailable_grok_cannot_demote_a_valid_local_verdict(self):
+        project={'source':'spider','status':'shortlisted','signals':{'authors':5},'votes':[]}
+        class FakeGrok:
+            def __init__(self,configured,result):self.configured=configured;self.result=result
+            def status(self):return {'enabled':True,'configured':self.configured}
+            def review(self,_project):return self.result
+        for configured,result in [(False,{'status':'disabled','votes':[]}),(True,{'status':'budget_exhausted','votes':[]}),(True,{'status':'partial','votes':[{'vote':'hold','available':False}]})]:
+            with patch.object(app,'GROK',FakeGrok(configured,result)):
+                current=dict(project)
+                self.assertEqual(app.apply_grok(current)['status'],'shortlisted')
+
     def test_grok_parallel_review_cache_and_persistent_budget(self):
         value={'vote':'pass','reason':'Evidence observed','evidence_ids':['post-0'],'unknowns':['Team identity']}
         body=json.dumps({'choices':[{'message':{'content':json.dumps(value)}}]}).encode()

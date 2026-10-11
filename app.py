@@ -322,12 +322,19 @@ def apply_grok(project):
     if not GROK or project['source']=='demo' or project['signals'].get('authors',0)<4:
         return project
     project['grok']=GROK.review(project)
-    if GROK.status()['enabled']:
-        votes=project['grok']['votes']
-        if any(v['vote']=='reject' for v in votes):
-            project['status']='rejected'
-        elif len(votes)!=4 or not all(v['vote']=='pass' and v.get('available') for v in votes):
-            if project['status']!='rejected':project['status']='held'
+    config=GROK.status()
+    # A missing key, exhausted budget, timeout or malformed model reply is not
+    # evidence against a candidate. Only a complete four-seat review may change
+    # the local evidence verdict; preserve a previous verdict on unavailable review.
+    if not config['enabled'] or not config['configured'] or project['grok'].get('status')!='complete':
+        return project
+    votes=project['grok']['votes']
+    if len(votes)!=4 or not all(v.get('available') for v in votes):
+        return project
+    if any(v['vote']=='reject' for v in votes):
+        project['status']='rejected'
+    elif not all(v['vote']=='pass' for v in votes):
+        if project['status']!='rejected':project['status']='held'
     return project
 
 

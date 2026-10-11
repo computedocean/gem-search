@@ -23,7 +23,7 @@
     busy=true;ui.go(found.rect,'Inspecting this post…');
     try{
       const response=await chrome.runtime.sendMessage({type:'capture',posts:[found.post]});
-      if(response?.ok){seen.add(found.post.id);if(seen.size>2000)seen.delete(seen.values().next().value);read++;ui?.update({read,status:response.queued?'Saved locally. Waiting for the research engine.':'Sent to JEV → crawler → Grok.'});}
+      if(response?.ok){seen.add(found.post.id);if(seen.size>2000)seen.delete(seen.values().next().value);read++;ui?.update({read,status:response.queued?'Saved locally. Waiting for the research engine.':'Sent to the research engine. Check the dashboard for crawler and Grok status.'});}
       else ui?.update({status:response?.error||'Open the extension popup to connect.'});
     }catch{ui?.update({status:'Extension restarted. Refresh this tab to reconnect.'});stop();}
     finally{busy=false;}

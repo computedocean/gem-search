@@ -19,6 +19,16 @@ test('extract timestamp permalink instead of quoted post permalink',()=>{
   assert.equal(extract(node).id,'456');assert.deepEqual(extract(node).links,['https://project.example/docs']);
   assert.equal(extract({querySelector:()=>null}),null);
 });
+test('resolve t.co only when the DOM explicitly exposes the expanded URL',()=>{
+  const anchor=(href,attrs={},text='')=>({href,innerText:text,textContent:text,getAttribute:key=>attrs[key]||null,dataset:{}});
+  const node={querySelector:q=>q.includes('tweetText')?{innerText:'A real research lead'}:{closest:()=>({href:'https://x.com/author/status/456'}),getAttribute:()=> '2026-01-01T12:00:00Z'},querySelectorAll:()=>[
+    anchor('https://t.co/abc',{'data-expanded-url':'https://project.example/docs'}),
+    anchor('https://t.co/unknown',{},'Click this'),
+    anchor('https://t.co/visible','', 'https://docs.example.org/guide'),
+    anchor('https://x.com/quote/status/999')
+  ]};
+  assert.deepEqual(extract(node).links,['https://project.example/docs','https://docs.example.org/guide']);
+});
 test('MV3 uses explicit activation and localhost-only host permissions',()=>{
   const m=JSON.parse(fs.readFileSync(new URL('../extension/manifest.json',import.meta.url)));
   assert.equal(m.manifest_version,3);assert.deepEqual(m.host_permissions,['http://127.0.0.1/*']);assert.equal(m.content_scripts,undefined);assert.equal(m.permissions.includes('cookies'),false);
